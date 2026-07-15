@@ -1,17 +1,74 @@
 import streamlit as st
-import json
+import sqlite3
+import re
 import os
 from datetime import datetime
 from pushbullet import Pushbullet
 
-# --- KONFIGURÁCIA ---
-DB_FILE = "kalendar_kapely.json"
-PB_API_KEY = "o.Ir4LWAKm78pwEhpKkAf6WZY9uZPNCkSm"
-LOGIN_MENO = "ovcanskeparobci"
-LOGIN_HESLO = "OvcanskeParobci123"
+# --- BEZPEČNÁ KONFIGURÁCIA (Streamlit Secrets) ---
+# Ak bežíš lokálne, Streamlit si tieto hodnoty vytiahne z .streamlit/secrets.toml
+# Na Streamlit Cloud ich zadáš priamo v nastaveniach aplikácie.
+PB_API_KEY = st.secrets.get("PB_API_KEY", "o.Ir4LWAKm78pwEhpKkAf6WZY9uZPNCkSm")  # Fallback pre lokálne testovanie
+LOGIN_MENO = st.secrets.get("ADMIN_USER", "ovcanskeparobci")
+LOGIN_HESLO = st.secrets.get("ADMIN_PASS", "OvcanskeParobci123")
 
-# HLAVNÁ FOTKA POZADIA
+DB_FILE = "kalendar.db"
 KAPELA_FOTO_URL = "https://i.postimg.cc/T1Pkgjnw/1000027016.jpg" 
+
+# --- DATABÁZOVÝ MANAŽMENT (SQLite) ---
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS rezervacie (
+            id TEXT PRIMARY KEY,
+            datum TEXT,
+            cas TEXT,
+            meno TEXT,
+            tel TEXT,
+            email TEXT,
+            detaily TEXT,
+            stav TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def nacti_data():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM rezervacie")
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def uloz_novu_rezervaciu(id_req, datum, cas, meno, tel, email, detaily, stav="cakajuce"):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO rezervacie (id, datum, cas, meno, tel, email, detaily, stav)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (id_req, str(datum), str(cas), meno, tel, email, detaily, stav))
+    conn.commit()
+    conn.close()
+
+def aktualizuj_stav(id_req, novy_stav):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE rezervacie SET stav = ? WHERE id = ?", (novy_stav, id_req))
+    conn.commit()
+    conn.close()
+
+def zmaz_rezervaciu(id_req):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM rezervacie WHERE id = ?", (id_req,))
+    conn.commit()
+    conn.close()
+
+# Inicializácia DB pri štarte
+init_db()
 
 # --- DIZAJN ---
 def apply_style():
@@ -41,7 +98,6 @@ def apply_style():
         .stForm {{ background-color: rgba(0, 0, 0, 0.8) !important; border: 2px solid #d4af37 !important; border-radius: 20px; padding: 30px; }}
         .stButton>button {{ background-color: #d4af37 !important; color: black !important; border-radius: 12px !important; font-weight: bold !important; width: 100%; transition: 0.3s; }}
         
-        /* Štýl pre zobrazenie detailov v admini */
         .admin-detail-box {{
             background-color: rgba(0, 100, 255, 0.15);
             border-left: 5px solid #0064ff;
@@ -50,25 +106,33 @@ def apply_style():
             border-radius: 5px;
             font-size: 0.95rem;
         }}
+        
+        /* Zaoblené obrázky v galérii s jemným tieňom */
+        .gallery-img {{
+            border-radius: 15px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            margin-bottom: 20px;
+        }}
         </style>
     """, unsafe_allow_html=True)
 
-# --- FUNKCIE ---
-def nacti_data():
-    if not os.path.exists(DB_FILE): return []
-    try:
-        with open(DB_FILE, "r") as f: return json.load(f)
-    except: return []
-
-def uloz_data(data):
-    with open(DB_FILE, "w") as f: json.dump(data, f, indent=4)
+# --- POMOCNÉ FUNKCIE ---
+def valid_email(email):
+    if not email:
+        return True  # Email je nepovinný
+    pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
+    return bool(re.match(pattern, email))
 
 def posli_upozornenie(text):
+    if not PB_API_KEY or PB_API_KEY.startswith("o.") is False:
+        return False
     try:
         pb = Pushbullet(PB_API_KEY)
         pb.push_note("🎸 NOVÝ DOPYT", text)
         return True
-    except: return False
+    except Exception as e:
+        print(f"Pushbullet error: {e}")
+        return False
 
 # --- ŠTART APP ---
 st.set_page_config(page_title="Ovčanske Parobci", page_icon="🎻", layout="centered")
@@ -95,83 +159,114 @@ if menu == "🎸 Rezervácia":
         
         if st.form_submit_button("ODOSLAŤ REZERVÁCIU"):
             db = nacti_data()
-            if any(a['datum'] == str(datum) for a in db):
-                st.error("Termín je už obsadený.")
+            # Kontrola, či je už termín pevne schválený
+            termin_obsadeny = any(a['datum'] == str(datum) and a.get('stav') == 'schvalene' for a in db)
+            
+            if termin_obsadeny:
+                st.error("Tento termín je už bohužiaľ obsadený a schválený.")
             elif not meno or not tel:
-                st.warning("Vyplňte meno a telefón.")
+                st.warning("Prosím, vyplňte meno a telefónne číslo.")
+            elif not valid_email(email):
+                st.error("Zadajte e-mail v správnom formáte.")
+            elif len(tel.replace(" ", "")) < 9:
+                st.error("Telefónne číslo sa zdá byť príliš krátke.")
             else:
-                nova = {
-                    "id": str(datetime.now().timestamp()), 
-                    "datum": str(datum), "cas": str(cas),
-                    "meno": meno, "tel": tel, "email": email, 
-                    "detaily": mesto_detaily, "stav": "cakajuce"
-                }
-                db.append(nova); uloz_data(db)
+                novy_id = str(datetime.now().timestamp()).replace(".", "")
+                uloz_novu_rezervaciu(novy_id, datum, cas, meno, tel, email, mesto_detaily)
+                
+                # Pushbullet správa
                 posli_upozornenie(f"Nový dopyt: {datum}\n{meno} ({tel})\nMiesto: {mesto_detaily}")
-                st.balloons(); st.success("Odoslané! Ozveme sa vám. ✅")
+                
+                st.balloons()
+                st.success("Odoslané! Váš dopyt evidujeme a čoskoro sa vám ozveme. ✅")
 
 # --- 2. GALÉRIA ---
 elif menu == "📸 Galéria":
     st.title("📸 Galéria")
-    fotky = ["https://i.postimg.cc/vZKfzcN0/received-1165768235166057.jpg", "https://i.postimg.cc/6pPn0ymH/received-640306331056375.jpg", "https://i.postimg.cc/cLzwmrbT/received-796698713423840.jpg", "https://i.postimg.cc/RZYKRND1/received-936809825229820.jpg"]
-    for f in fotky: st.image(f, use_container_width=True)
+    fotky = [
+        "https://i.postimg.cc/vZKfzcN0/received-1165768235166057.jpg", 
+        "https://i.postimg.cc/6pPn0ymH/received-640306331056375.jpg", 
+        "https://i.postimg.cc/cLzwmrbT/received-796698713423840.jpg", 
+        "https://i.postimg.cc/RZYKRND1/received-936809825229820.jpg"
+    ]
+    for f in fotky: 
+        st.image(f, use_container_width=True)
 
 # --- 3. ADMIN ---
 else:
     st.title("🔐 Administrácia")
-    if 'auth' not in st.session_state: st.session_state['auth'] = False
+    if 'auth' not in st.session_state: 
+        st.session_state['auth'] = False
+        
     if not st.session_state['auth']:
         with st.form("login"):
-            u = st.text_input("Meno"); h = st.text_input("Heslo", type="password")
+            u = st.text_input("Meno")
+            h = st.text_input("Heslo", type="password")
             if st.form_submit_button("Vstúpiť"):
-                if u == LOGIN_MENO and h == LOGIN_HESLO: st.session_state['auth'] = True; st.rerun()
-                else: st.error("Chyba!")
+                if u == LOGIN_MENO and h == LOGIN_HESLO: 
+                    st.session_state['auth'] = True
+                    st.rerun()
+                else: 
+                    st.error("Nesprávne prihlasovacie údaje!")
     else:
-        if st.sidebar.button("Odhlásiť sa"): st.session_state['auth'] = False; st.rerun()
+        if st.sidebar.button("Odhlásiť sa"): 
+            st.session_state['auth'] = False
+            st.rerun()
+            
         t1, t2, t3 = st.tabs(["📩 Nové dopyty", "📅 Kalendár", "➕ Pridať"])
         db = nacti_data()
         
         with t1:
+            # Čakajúce dopyty zoradené od najnovších dátumov
             cakajuce = [a for a in db if a.get("stav") == "cakajuce"]
+            cakajuce.sort(key=lambda x: x['datum'])
+            
+            if not cakajuce:
+                st.info("Žiadne nové čakajúce dopyty. 🎉")
+                
             for i, a in enumerate(cakajuce):
-                # OŠETRENIE STARÝCH DÁT: Ak nemá pole 'detaily', skús 'poznamka'
-                info_mesto = a.get('detaily', a.get('poznamka', 'Neuvedené'))
+                info_mesto = a.get('detaily', 'Neuvedené')
                 with st.expander(f"DOPYT: {a['datum']} - {a.get('meno', 'Neznámy')}"):
-                    st.write(f"📞 **Kontakt:** {a.get('tel', '---')} | 📧 {a.get('email', '---')}")
+                    # Rýchle klikateľné prepojenia
+                    st.markdown(f"📞 **Kontakt:** [{a.get('tel', '---')}](tel:{a.get('tel', '')}) | 📧 [{a.get('email', '---')}](mailto:{a.get('email', '')})")
                     st.write(f"🕒 **Čas:** {a.get('cas', '---')}")
-                    
-                    # TOTO JE TEN BOX S DETAILAMI
                     st.markdown(f"""<div class="admin-detail-box"><b>Miesto a detaily:</b><br>{info_mesto}</div>""", unsafe_allow_html=True)
                     
                     c1, c2 = st.columns(2)
                     if c1.button("✅ Schváliť", key=f"ok{i}"):
-                        for item in db:
-                            if item['id'] == a['id']: item['stav'] = "schvalene"
-                        uloz_data(db); st.rerun()
+                        aktualizuj_stav(a['id'], "schvalene")
+                        st.rerun()
                     if c2.button("🗑️ Zmazať", key=f"no{i}"):
-                        db = [item for item in db if item['id'] != a['id']]
-                        uloz_data(db); st.rerun()
+                        zmaz_rezervaciu(a['id'])
+                        st.rerun()
         
         with t2:
-            schvalene = [a for a in db if a.get("stav") == "schvalene" or "stav" not in a]
+            # Schválené akcie zoradené chronologicky
+            schvalene = [a for a in db if a.get("stav") == "schvalene"]
             schvalene.sort(key=lambda x: x['datum'])
+            
+            if not schvalene:
+                st.info("Zatiaľ žiadne schválené akcie v kalendári.")
+                
             for i, a in enumerate(schvalene):
-                info_mesto = a.get('detaily', a.get('poznamka', 'Neuvedené'))
+                info_mesto = a.get('detaily', 'Neuvedené')
                 with st.expander(f"📅 {a['datum']} - {a.get('meno', 'Akcia')}"):
-                    st.write(f"📞 {a.get('tel', '')} | 🕒 {a.get('cas', '')}")
-                    
-                    # ZOBRAZENIE DETAILOV AJ V KALENDÁRI
+                    st.markdown(f"📞 **Kontakt:** [{a.get('tel', '---')}](tel:{a.get('tel', '')}) | 🕒 {a.get('cas', '')}")
                     st.markdown(f"""<div class="admin-detail-box"><b>Miesto/Poznámka:</b><br>{info_mesto}</div>""", unsafe_allow_html=True)
                     
                     if st.button("🗑️ Odstrániť", key=f"del{i}"):
-                        db = [item for item in db if item['id'] != a['id']]
-                        uloz_data(db); st.rerun()
+                        zmaz_rezervaciu(a['id'])
+                        st.rerun()
         
         with t3:
             with st.form("add_manual"):
-                d = st.date_input("Dátum"); m = st.text_input("Názov"); det = st.text_area("Miesto/Poznámka")
+                d = st.date_input("Dátum")
+                m = st.text_input("Názov")
+                det = st.text_area("Miesto/Poznámka")
                 if st.form_submit_button("Uložiť"):
-                    db.append({"id": str(datetime.now().timestamp()), "datum": str(d), "meno": m, "detaily": det, "stav": "schvalene"})
-                    uloz_data(db); st.success("OK"); st.rerun()
+                    novy_id = str(datetime.now().timestamp()).replace(".", "")
+                    uloz_novu_rezervaciu(novy_id, d, "Neuvedený", m, "Neuvedené", "Neuvedený", det, stav="schvalene")
+                    st.success("Akcia pridaná priamo do kalendára! ✅")
+                    st.rerun()
 
 st.markdown(f'<div style="text-align:center; margin-top:50px; color:#ccc;"><b>Podpora:</b> 0944 757 122</div>', unsafe_allow_html=True)
