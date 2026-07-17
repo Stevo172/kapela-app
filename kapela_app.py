@@ -2,9 +2,10 @@ import streamlit as st
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from datetime import datetime
+from datetime import datetime, timedelta
 from pushbullet import Pushbullet
 from supabase import create_client
+import calendar
 
 # --- BEZPEČNÁ KONFIGURÁCIA (IBA st.secrets) ---
 # ⚠️ VŠETKY CITLIVÉ ÚDAJE MUSIA BYŤ V st.secrets - NIKDY V KÓDE!
@@ -152,6 +153,92 @@ def apply_style():
             box-shadow: 0 0 18px #d4af37 !important;
             border-color: #ffffff !important;
         }}
+
+        /* KALENDÁR TABUĽKA ŠTÝLY */
+        .calendar-table {{
+            width: 100%;
+            border-collapse: collapse;
+            background: rgba(0, 0, 0, 0.7);
+            border: 2px solid #d4af37;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 20px 0;
+        }}
+
+        .calendar-table th {{
+            background: rgba(212, 175, 55, 0.3);
+            color: #d4af37;
+            padding: 12px;
+            font-weight: bold;
+            border: 1px solid #d4af37;
+            text-align: center;
+        }}
+
+        .calendar-table td {{
+            padding: 10px;
+            border: 1px solid #555;
+            text-align: center;
+            font-weight: bold;
+            min-height: 40px;
+            vertical-align: middle;
+        }}
+
+        .day-volny {{
+            background-color: rgba(0, 180, 100, 0.4);
+            border: 2px solid #00ff88 !important;
+            color: #00ff88;
+            cursor: pointer;
+            transition: all 0.3s;
+        }}
+
+        .day-volny:hover {{
+            background-color: rgba(0, 200, 120, 0.6);
+            box-shadow: 0 0 10px #00ff88;
+        }}
+
+        .day-obsadeny {{
+            background-color: rgba(200, 0, 0, 0.4);
+            border: 2px solid #ff4444 !important;
+            color: #ff6666;
+        }}
+
+        .day-cakajuci {{
+            background-color: rgba(200, 150, 0, 0.4);
+            border: 2px solid #ffbb00 !important;
+            color: #ffdd00;
+        }}
+
+        .day-empty {{
+            background-color: rgba(50, 50, 50, 0.3);
+            border: 1px solid #333 !important;
+            color: #666;
+        }}
+
+        .legend-box {{
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid #d4af37;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 15px 0;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 20px;
+        }}
+
+        .legend-item {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9rem;
+        }}
+
+        .legend-color {{
+            width: 25px;
+            height: 25px;
+            border-radius: 4px;
+            border: 2px solid;
+        }}
         </style>
     """, unsafe_allow_html=True)
 
@@ -208,6 +295,89 @@ def nacti_vsetky_media():
         except Exception as e:
             pass
     return subbory_list
+
+# --- KALENDÁR GENERÁTOR (TABUĽKA) ---
+def vygeneruj_kalendar(rok, mesiac, db_data):
+    """Vygeneruje HTML tabuľku s farbením dní podľa stavu"""
+    # Získaj všetky obsadené a čakajúce dni
+    obsadene_dni = set()
+    cakajuce_dni = set()
+    
+    for zaznam in db_data:
+        try:
+            datum_obj = datetime.strptime(zaznam.get('datum', ''), '%Y-%m-%d').date()
+            if datum_obj.year == rok and datum_obj.month == mesiac:
+                if zaznam.get('stav') == 'schvalene':
+                    obsadene_dni.add(datum_obj.day)
+                elif zaznam.get('stav') == 'cakajuce':
+                    cakajuce_dni.add(datum_obj.day)
+        except:
+            pass
+    
+    # Vygeneruj HTML tabuľku
+    mesiace = ["Januar", "Februar", "Marec", "April", "Maj", "Jun", 
+               "Jul", "August", "September", "Oktober", "November", "December"]
+    
+    cal = calendar.monthcalendar(rok, mesiac)
+    dny_tyzdna = ["Po", "Ut", "St", "Št", "Pia", "So", "Ne"]
+    
+    html = f"""
+    <h4 style="text-align: center; color: #d4af37;">📅 {mesiace[mesiac-1]} {rok}</h4>
+    <table class="calendar-table">
+        <tr>
+    """
+    
+    # Hlavičky dní
+    for den_nazov in dny_tyzdna:
+        html += f"<th>{den_nazov}</th>"
+    
+    html += "</tr>"
+    
+    # Dni kalendára
+    for tyzden in cal:
+        html += "<tr>"
+        for den in tyzden:
+            if den == 0:
+                html += '<td class="day-empty"></td>'
+            else:
+                datum_str = f"{rok}-{mesiac:02d}-{den:02d}"
+                datum_obj = datetime.strptime(datum_str, '%Y-%m-%d').date()
+                dnes = datetime.now().date()
+                
+                if datum_obj < dnes:
+                    html += f'<td class="day-empty">❌<br>{den}</td>'
+                elif den in obsadene_dni:
+                    html += f'<td class="day-obsadeny">🔴<br>{den}</td>'
+                elif den in cakajuce_dni:
+                    html += f'<td class="day-cakajuci">🟡<br>{den}</td>'
+                else:
+                    html += f'<td class="day-volny">🟢<br>{den}</td>'
+        
+        html += "</tr>"
+    
+    html += """
+    </table>
+    <div class="legend-box">
+        <div class="legend-item">
+            <div class="legend-color" style="background: rgba(0, 180, 100, 0.4); border-color: #00ff88;"></div>
+            <span>🟢 Voľný</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: rgba(200, 150, 0, 0.4); border-color: #ffbb00;"></div>
+            <span>🟡 Čakajúci</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: rgba(200, 0, 0, 0.4); border-color: #ff4444;"></div>
+            <span>🔴 Obsadený</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: rgba(50, 50, 50, 0.3); border-color: #333;"></div>
+            <span>❌ Minulosť</span>
+        </div>
+    </div>
+    """
+    
+    return html
 
 # --- NOTIFIKÁCIE ---
 def posli_upozornenie(text):
@@ -283,6 +453,30 @@ if 'db_data' not in st.session_state:
 if menu == "🎸 Rezervácia":
     st.title("🎻 Rezervácia vystúpenia")
     st.markdown('<div class="info-box">🪗 Akordeón | 🎻 Husle | 🥁 Bubon | 🎷 Saxofón</div>', unsafe_allow_html=True)
+    
+    # --- KALENDÁR ---
+    st.markdown("<h4 style='text-align: center; margin-bottom: 10px; margin-top: 20px;'>📅 Dostupnosť v kalendári</h4>", unsafe_allow_html=True)
+    
+    dnes = datetime.now()
+    mesice_options = []
+    for i in range(12):
+        mesiac_num = dnes.month + i
+        rok_num = dnes.year
+        if mesiac_num > 12:
+            mesiac_num -= 12
+            rok_num += 1
+        mesice_options.append((rok_num, mesiac_num))
+    
+    vybrany_mesiac = st.selectbox(
+        "Vyber mesiac:",
+        mesice_options,
+        format_func=lambda x: f"{['Januar', 'Februar', 'Marec', 'April', 'Maj', 'Jun', 'Jul', 'August', 'September', 'Oktober', 'November', 'December'][x[1]-1]} {x[0]}",
+        key="mesiac_selector"
+    )
+    
+    db = nacti_data()
+    kalendar_html = vygeneruj_kalendar(vybrany_mesiac[0], vybrany_mesiac[1], db)
+    st.markdown(kalendar_html, unsafe_allow_html=True)
     
     st.markdown("<h4 style='text-align: center; margin-bottom: 5px; margin-top: 20px;'>Výpočet ceny vystúpenia</h4>", unsafe_allow_html=True)
     
