@@ -2,9 +2,11 @@ import streamlit as st
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from datetime import datetime
+from datetime import datetime, timedelta
 from pushbullet import Pushbullet
 from supabase import create_client
+import calendar
+import pandas as pd
 
 # --- BEZPEČNÁ KONFIGURÁCIA (IBA st.secrets) ---
 # ⚠️ VŠETKY CITLIVÉ ÚDAJE MUSIA BYŤ V st.secrets - NIKDY V KÓDE!
@@ -209,6 +211,67 @@ def nacti_vsetky_media():
             pass
     return subbory_list
 
+# --- KALENDÁR GENERÁTOR (STREAMLIT TABUĽKA) ---
+def vygeneruj_kalendar_streamlit(rok, mesiac, db_data):
+    """Vygeneruje Streamlit DataFrame s kalendárom"""
+    # Získaj všetky obsadené a čakajúce dni
+    obsadene_dni = set()
+    cakajuce_dni = set()
+    
+    for zaznam in db_data:
+        try:
+            datum_obj = datetime.strptime(zaznam.get('datum', ''), '%Y-%m-%d').date()
+            if datum_obj.year == rok and datum_obj.month == mesiac:
+                if zaznam.get('stav') == 'schvalene':
+                    obsadene_dni.add(datum_obj.day)
+                elif zaznam.get('stav') == 'cakajuce':
+                    cakajuce_dni.add(datum_obj.day)
+        except:
+            pass
+    
+    # Vygeneruj tabuľku
+    mesiace = ["Januar", "Februar", "Marec", "April", "Maj", "Jun", 
+               "Jul", "August", "September", "Oktober", "November", "December"]
+    dny_tyzdna = ["Po", "Ut", "St", "Št", "Pia", "So", "Ne"]
+    
+    cal = calendar.monthcalendar(rok, mesiac)
+    dnes = datetime.now().date()
+    
+    # Vytvor dáta pre tabuľku
+    cal_data = []
+    for tyzden in cal:
+        tyzden_data = []
+        for den in tyzden:
+            if den == 0:
+                tyzden_data.append("")
+            else:
+                datum_obj = datetime(rok, mesiac, den).date()
+                if datum_obj < dnes:
+                    tyzden_data.append(f"❌ {den}")
+                elif den in obsadene_dni:
+                    tyzden_data.append(f"🔴 {den}")
+                elif den in cakajuce_dni:
+                    tyzden_data.append(f"🟡 {den}")
+                else:
+                    tyzden_data.append(f"🟢 {den}")
+        cal_data.append(tyzden_data)
+    
+    df = pd.DataFrame(cal_data, columns=dny_tyzdna)
+    
+    st.write(f"### {mesiace[mesiac-1]} {rok}")
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    
+    # Legenda
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.write("🟢 **Voľný**")
+    with col2:
+        st.write("🟡 **Čakajúci**")
+    with col3:
+        st.write("🔴 **Obsadený**")
+    with col4:
+        st.write("❌ **Minulosť**")
+
 # --- NOTIFIKÁCIE ---
 def posli_upozornenie(text):
     try:
@@ -283,6 +346,29 @@ if 'db_data' not in st.session_state:
 if menu == "🎸 Rezervácia":
     st.title("🎻 Rezervácia vystúpenia")
     st.markdown('<div class="info-box">🪗 Akordeón | 🎻 Husle | 🥁 Bubon | 🎷 Saxofón</div>', unsafe_allow_html=True)
+    
+    # --- KALENDÁR ---
+    st.markdown("<h4 style='text-align: center; margin-bottom: 10px; margin-top: 20px;'>📅 Dostupnosť v kalendári</h4>", unsafe_allow_html=True)
+    
+    dnes = datetime.now()
+    mesice_options = []
+    for i in range(12):
+        mesiac_num = dnes.month + i
+        rok_num = dnes.year
+        if mesiac_num > 12:
+            mesiac_num -= 12
+            rok_num += 1
+        mesice_options.append((rok_num, mesiac_num))
+    
+    vybrany_mesiac = st.selectbox(
+        "Vyber mesiac:",
+        mesice_options,
+        format_func=lambda x: f"{['Januar', 'Februar', 'Marec', 'April', 'Maj', 'Jun', 'Jul', 'August', 'September', 'Oktober', 'November', 'December'][x[1]-1]} {x[0]}",
+        key="mesiac_selector"
+    )
+    
+    db = nacti_data()
+    vygeneruj_kalendar_streamlit(vybrany_mesiac[0], vybrany_mesiac[1], db)
     
     st.markdown("<h4 style='text-align: center; margin-bottom: 5px; margin-top: 20px;'>Výpočet ceny vystúpenia</h4>", unsafe_allow_html=True)
     
